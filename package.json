@@ -1,0 +1,11 @@
+{
+  "name": "veneration",
+  "version": "0.1.0",
+  "description": "A playable simulated universe in three.js: cosmic web -> galaxy -> star system -> living planets.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node tools/serve.mjs",
+    "shot": "node tools/shot.mjs"
+  }
+}
