@@ -40,6 +40,7 @@ sun.position.copy(sunDir); sun.castShadow = true; sun.shadow.mapSize.set(2048, 2
 scene.add(sun);
 const hemi = new THREE.HemisphereLight(0xa9c8ff, 0x5a5148, 0.15 + 0.75 * day);
 scene.add(hemi);
+sun.layers.enableAll(); hemi.layers.enableAll();
 // sky dome: simple analytic gradient + sun glow so silhouettes read like they will in-game
 const sky = new THREE.Mesh(new THREE.SphereGeometry(9000, 32, 16), new THREE.ShaderMaterial({
   side: THREE.BackSide, depthWrite: false, uniforms: { uSun: { value: sunDir }, uDay: { value: day } },

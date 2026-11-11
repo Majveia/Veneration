@@ -1,6 +1,9 @@
 // HDR render pipeline shared by every mode.
 //
 //   scene  ->  rtScene (RGBA16F + 32F depth, MSAA)
+//             (objects on LAYER_REFRACT are drawn in a second phase and can
+//              sample the opaque scene behind them: post.shared.tOpaqueColor /
+//              tOpaqueDepth - water, glass, heat haze, force fields ...)
 //          ->  [effects chain: fullscreen passes that read tColor + tDepth]
 //          ->  bloom (13-tap down / tent up mip chain)
 //          ->  final: exposure, ACES tonemap, grade, vignette, grain, dither, sRGB
@@ -8,6 +11,16 @@
 // Effects are how modes add depth-aware fullscreen work (atmospheric scattering,
 // analytic oceans, volumetric clouds, god rays ...). See addEffect().
 import * as THREE from 'three';
+
+// Refractive layer. Put a mesh on it with mesh.layers.set(LAYER_REFRACT) and set
+// scene.userData.refractive = true. Its material may reference the uniform
+// objects in post.shared directly (same object identity = always current):
+//   tOpaqueColor  HDR colour of everything opaque (and layer-0 transparent)
+//   tOpaqueDepth  .r = positive view-space depth in metres of that scene (1e30+ = sky)
+//   uResolution   render size in pixels (gl_FragCoord.xy / uResolution = screen uv)
+// The mesh is depth-tested against the opaque scene and may write depth.
+// Lights only reach the layer if light.layers.enableAll() was called.
+export const LAYER_REFRACT = 1;
 
 // Shared GLSL for effect fragment shaders. Uniform values are filled in
 // automatically for any effect material that declares them (see STD_UNIFORMS).
@@ -113,6 +126,19 @@ const COPY_FRAG = /* glsl */ `
 uniform sampler2D tSrc; varying vec2 vUv;
 void main() { gl_FragColor = texture2D(tSrc, vUv); }`;
 
+const DEPTH_COPY_FRAG = /* glsl */ `
+${'uniform sampler2D tDepth; uniform float uCamNear; uniform float uCamFar; varying vec2 vUv;'}
+float viewDepth(float d) {
+#if defined( USE_REVERSED_DEPTH_BUFFER )
+  return (uCamNear * uCamFar) / (uCamNear + d * (uCamFar - uCamNear));
+#elif defined( USE_LOGARITHMIC_DEPTH_BUFFER )
+  return exp2(d * log2(uCamFar + 1.0)) - 1.0;
+#else
+  return (uCamNear * uCamFar) / (uCamFar - d * (uCamFar - uCamNear));
+#endif
+}
+void main() { float vd = viewDepth(texture2D(tDepth, vUv).x); gl_FragColor = vec4(vd >= uCamFar * 0.98 ? 1e30 : vd, 0.0, 0.0, 1.0); }`;
+
 const FINAL_FRAG = /* glsl */ `
 uniform sampler2D tColor; uniform sampler2D tBloom;
 uniform float uExposure, uBloom, uVignette, uGrain, uSaturation, uContrast, uFade, uTime, uAberration;
@@ -183,6 +209,8 @@ export class Post {
     this._up.blending = THREE.AdditiveBlending;
     this._up.transparent = true;
     this._copy = mk(COPY_FRAG, { tSrc: { value: null } });
+    this._depthCopy = mk(DEPTH_COPY_FRAG, { tDepth: { value: null }, uCamNear: { value: 0.1 }, uCamFar: { value: 1000 } });
+    this.shared = { tOpaqueColor: { value: null }, tOpaqueDepth: { value: null }, uResolution: { value: new THREE.Vector2(1, 1) } };
     this._final = mk(FINAL_FRAG, {
       tColor: { value: null }, tBloom: { value: null }, uExposure: { value: 1 }, uBloom: { value: 0.6 }, uVignette: { value: 0.25 },
       uGrain: { value: 0.02 }, uSaturation: { value: 1 }, uContrast: { value: 1 }, uFade: { value: 0 }, uTime: { value: 0 }, uAberration: { value: 0 },
@@ -198,6 +226,11 @@ export class Post {
     this.rtScene = new THREE.WebGLRenderTarget(w, h, { ...hdr, depthBuffer: true, samples: this.quality.msaa | 0 });
     this.rtScene.depthTexture = new THREE.DepthTexture(w, h, THREE.FloatType);
     this.rtScene.depthTexture.format = THREE.DepthFormat;
+    this.rtOpaque = new THREE.WebGLRenderTarget(w, h, hdr);
+    this.rtOpaqueDepth = new THREE.WebGLRenderTarget(w, h, { type: THREE.FloatType, format: THREE.RedFormat, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer: false, generateMipmaps: false });
+    this.shared.tOpaqueColor.value = this.rtOpaque.texture;
+    this.shared.tOpaqueDepth.value = this.rtOpaqueDepth.texture;
+    this.shared.uResolution.value.set(w, h);
     this.rtA = new THREE.WebGLRenderTarget(w, h, hdr);
     this.rtB = new THREE.WebGLRenderTarget(w, h, hdr);
     this.mips = [];
@@ -214,7 +247,7 @@ export class Post {
   }
 
   dispose() {
-    for (const rt of [this.rtScene, this.rtA, this.rtB, ...(this.mips || [])]) rt && rt.dispose();
+    for (const rt of [this.rtScene, this.rtOpaque, this.rtOpaqueDepth, this.rtA, this.rtB, ...(this.mips || [])]) rt && rt.dispose();
     if (this.rtScene && this.rtScene.depthTexture) this.rtScene.depthTexture.dispose();
   }
 
@@ -258,10 +291,31 @@ export class Post {
   render(scene, camera, dt = 0) {
     const r = this.renderer, s = this.settings;
     this.time += dt;
+    // shadow maps render once per frame (first scene pass), not once per pass
+    r.shadowMap.autoUpdate = false; r.shadowMap.needsUpdate = true;
+    const mask = camera.layers.mask;
+    camera.layers.disable(LAYER_REFRACT);
     r.setRenderTarget(this.rtScene);
     r.setClearColor(0x000000, 1);
     r.clear(true, true, true);
     r.render(scene, camera);
+    if (scene.userData.refractive) {
+      // snapshot the opaque scene, then draw the refractive layer over it
+      this._copy.uniforms.tSrc.value = this.rtScene.texture;
+      this._pass(this._copy, this.rtOpaque);
+      const dc = this._depthCopy.uniforms;
+      dc.tDepth.value = this.rtScene.depthTexture; dc.uCamNear.value = camera.near; dc.uCamFar.value = camera.far;
+      this._pass(this._depthCopy, this.rtOpaqueDepth);
+      r.autoClear = false;
+      // the MSAA colour buffer may have been invalidated by the resolve: restore it
+      this._copy.uniforms.tSrc.value = this.rtOpaque.texture;
+      this._pass(this._copy, this.rtScene);
+      camera.layers.set(LAYER_REFRACT);
+      r.setRenderTarget(this.rtScene);
+      r.render(scene, camera);
+      r.autoClear = true;
+    }
+    camera.layers.mask = mask;
 
     // effects chain
     let read = this.rtScene, write = this.rtA;

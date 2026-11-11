@@ -5,6 +5,10 @@
 // runs after (world.camera matrices, world.sunDir are final for the frame).
 // A system that throws while loading is skipped, so one broken system never
 // takes the world down.
+//
+// Intended order once everything exists (add your entry in this order):
+//   player (replaces controller), vehicles, terrain, ocean, flora, fauna, civ,
+//   atmosphere, space
 export const SYSTEM_LIST = [
   'controller',   // camera / player input -> world.cam   (baseline: free-fly drone)
   'terrain',      // quadtree planet surfaces

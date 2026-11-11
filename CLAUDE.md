@@ -63,6 +63,9 @@ buffer is reversed float depth where `EXT_clip_control` exists, logarithmic othe
 chunks) so they work in both. Depth-reading fullscreen work goes through
 `ctx.post.addEffect({name, order, material, update?})` using `POST_VERT` + `GLSL_POST_COMMON`
 (`viewDepth`, `pixelRay`, `sceneDistance`). Camera range in world mode: near 0.1, far 2e10.
+Refractive surfaces (water, glass): put the mesh on `LAYER_REFRACT`, set
+`scene.userData.refractive = true` and sample `post.shared.tOpaqueColor / tOpaqueDepth`
+(see `core/post.js`); lights need `light.layers.enableAll()` to reach that layer.
 
 **Input**: read actions only (`input.move`, `input.look`, `input.down/pressed('jump')`,
 `input.pointer`, `input.tapped`, `input.zoom`). Touch UI drives `input.virtual`.
@@ -92,6 +95,11 @@ meshes, physics and placement must all agree with it.
                 camera: { distance, height, fov, firstPerson: Vector3 (local eye) },
                 canEnter(playerPos) -> bool, enter(player), exit(player) -> exit position,
                 drive(dt, input), idle(dt), speed (m/s, for HUD), hud?: {...} }
+
+    world.physics = { colliders: Set, addCollider(c), removeCollider(c) }   // static shapes, see world/index.js
+        c = { body, type: 'cylinder', pos (body-local base centre), radius, height }
+          | { body, type: 'box', pos (body-local centre), quat, half: Vector3 }
+          | { body, type: 'sphere', pos, radius }
 
 While mounted the player system calls `vehicle.drive(dt, ctx.input)` every frame, keeps the
 character in the seat and drives the camera from `vehicle.camera`; otherwise the vehicles

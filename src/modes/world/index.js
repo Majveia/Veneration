@@ -66,6 +66,7 @@ export default async function create(ctx) {
   scene.add(sun);
   const hemi = new THREE.HemisphereLight(0x9ec4ff, 0x4a4036, 0.6);
   scene.add(hemi);
+  sun.layers.enableAll(); hemi.layers.enableAll(); // also light the refractive layer (see core/post.js)
 
   const world = {
     ctx, scene, camera, frameRoot,
@@ -80,6 +81,16 @@ export default async function create(ctx) {
     sunDist: 1,
     lighting: { sun, hemi, sunColor: new THREE.Color(1, 1, 1), sunIntensity: 3 },
     systems: {}, _list: [],
+    // Static collision shapes registered by world systems (buildings, trunks,
+    // rocks, landed ships). The player / vehicle systems resolve against them.
+    //   { body, type: 'cylinder', pos (body-local base centre), radius, height }   axis = local up at pos
+    //   { body, type: 'box', pos (body-local centre), quat (body-local), half: Vector3 }
+    //   { body, type: 'sphere', pos (body-local centre), radius }
+    physics: {
+      colliders: new Set(),
+      addCollider(c) { this.colliders.add(c); return c; },
+      removeCollider(c) { this.colliders.delete(c); },
+    },
 
     // --- frame helpers -----------------------------------------------------
     toLocal(body, framePos, out = new THREE.Vector3()) { return out.copy(framePos).sub(body.pos).applyQuaternion(_q.copy(body.group.quaternion).invert()); },
